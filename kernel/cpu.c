@@ -948,14 +948,23 @@ static int cpuhp_down_callbacks(unsigned int cpu, struct cpuhp_cpu_state *st,
 }
 
 /* Requires cpu_add_remove_lock to be held */
+extern int rcu_expedited;
 static int __ref _cpu_down(unsigned int cpu, int tasks_frozen,
 			   enum cpuhp_state target)
 {
 	struct cpuhp_cpu_state *st = per_cpu_ptr(&cpuhp_state, cpu);
 	int prev_state, ret = 0;
+#ifndef CONFIG_TINY_RCU
+	int rcu_expedited_back;
+#endif
 
 	if (num_online_cpus() == 1)
 		return -EBUSY;
+
+#ifndef CONFIG_TINY_RCU
+	rcu_expedited_back = rcu_expedited;
+	rcu_expedited = 0;
+#endif
 
 	if (!cpu_present(cpu))
 		return -EINVAL;
@@ -1006,6 +1015,11 @@ out:
 	 */
 	lockup_detector_cleanup();
 	arch_smt_update();
+
+#ifndef CONFIG_TINY_RCU
+	rcu_expedited = rcu_expedited_back;
+#endif
+
 	return ret;
 }
 
@@ -1090,6 +1104,12 @@ static int _cpu_up(unsigned int cpu, int tasks_frozen, enum cpuhp_state target)
 	struct cpuhp_cpu_state *st = per_cpu_ptr(&cpuhp_state, cpu);
 	struct task_struct *idle;
 	int ret = 0;
+#ifndef CONFIG_TINY_RCU
+	int rcu_expedited_back;
+
+	rcu_expedited_back = rcu_expedited;
+	rcu_expedited = 0;
+#endif
 
 	cpus_write_lock();
 
@@ -1141,6 +1161,10 @@ static int _cpu_up(unsigned int cpu, int tasks_frozen, enum cpuhp_state target)
 out:
 	cpus_write_unlock();
 	arch_smt_update();
+
+#ifndef CONFIG_TINY_RCU
+	rcu_expedited = rcu_expedited_back;
+#endif
 	return ret;
 }
 
@@ -1242,6 +1266,7 @@ void __weak arch_enable_nonboot_cpus_end(void)
 void enable_nonboot_cpus(void)
 {
 	int cpu, error;
+	struct device *cpu_device;
 
 	/* Allow everyone to use the CPU hotplug again */
 	cpu_maps_update_begin();
@@ -1259,6 +1284,12 @@ void enable_nonboot_cpus(void)
 		trace_suspend_resume(TPS("CPU_ON"), cpu, false);
 		if (!error) {
 			pr_info("CPU%d is up\n", cpu);
+			cpu_device = get_cpu_device(cpu);
+			if (!cpu_device)
+				pr_err("%s: failed to get cpu%d device\n",
+				       __func__, cpu);
+			else
+				kobject_uevent(&cpu_device->kobj, KOBJ_ONLINE);
 			continue;
 		}
 		pr_warn("Error taking CPU%d up: %d\n", cpu, error);
@@ -2256,6 +2287,9 @@ EXPORT_SYMBOL(__cpu_present_mask);
 
 struct cpumask __cpu_active_mask __read_mostly;
 EXPORT_SYMBOL(__cpu_active_mask);
+
+struct cpumask __cpu_isolated_mask __read_mostly;
+EXPORT_SYMBOL(__cpu_isolated_mask);
 
 void init_cpu_present(const struct cpumask *src)
 {

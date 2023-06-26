@@ -14,6 +14,7 @@ struct device;
 #define SYS_POWER_OFF	0x0003	/* Notify of system power off */
 
 enum reboot_mode {
+	REBOOT_UNDEFINED = -1,
 	REBOOT_COLD = 0,
 	REBOOT_WARM,
 	REBOOT_HARD,
@@ -21,6 +22,7 @@ enum reboot_mode {
 	REBOOT_GPIO,
 };
 extern enum reboot_mode reboot_mode;
+extern enum reboot_mode panic_reboot_mode;
 
 enum reboot_type {
 	BOOT_TRIPLE	= 't',
@@ -36,7 +38,10 @@ extern enum reboot_type reboot_type;
 extern int reboot_default;
 extern int reboot_cpu;
 extern int reboot_force;
-
+extern struct atomic_notifier_head restart_handler_list;
+#ifdef CONFIG_PM_SLEEP
+extern struct blocking_notifier_head pm_chain_head;
+#endif
 
 extern int register_reboot_notifier(struct notifier_block *);
 extern int unregister_reboot_notifier(struct notifier_block *);

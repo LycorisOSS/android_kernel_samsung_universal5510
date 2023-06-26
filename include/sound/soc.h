@@ -239,6 +239,14 @@
 	.get = xhandler_get, .put = xhandler_put, \
 	.private_value = SOC_DOUBLE_R_VALUE(reg_left, reg_right, xshift, \
 					    xmax, xinvert) }
+#define SOC_SINGLE_MULTI_EXT(xname, xreg, xshift, xmax, xinvert, xcount,\
+	xhandler_get, xhandler_put) \
+{	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = xname, \
+	.info = snd_soc_info_multi_ext, \
+	.get = xhandler_get, .put = xhandler_put, \
+	.private_value = (unsigned long)&(struct soc_multi_mixer_control) \
+		{.reg = xreg, .shift = xshift, .rshift = xshift, .max = xmax, \
+		.count = xcount, .platform_max = xmax, .invert = xinvert} }
 #define SOC_SINGLE_EXT_TLV(xname, xreg, xshift, xmax, xinvert,\
 	 xhandler_get, xhandler_put, tlv_array) \
 {	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = xname, \
@@ -361,16 +369,19 @@
 
 #define SOC_ENUM_SINGLE_VIRT_DECL(name, xtexts) \
 	const struct soc_enum name = SOC_ENUM_SINGLE_VIRT(ARRAY_SIZE(xtexts), xtexts)
-
 /*
  * Component probe and remove ordering levels for components with runtime
  * dependencies.
- */
+*/
 #define SND_SOC_COMP_ORDER_FIRST		-2
 #define SND_SOC_COMP_ORDER_EARLY		-1
 #define SND_SOC_COMP_ORDER_NORMAL		0
 #define SND_SOC_COMP_ORDER_LATE		1
 #define SND_SOC_COMP_ORDER_LAST		2
+
+/* DAI Link Host Mode Support */
+#define SND_SOC_DAI_LINK_NO_HOST		0x1
+#define SND_SOC_DAI_LINK_OPT_HOST		0x2
 
 /*
  * Bias levels
@@ -501,8 +512,8 @@ int snd_soc_set_runtime_hwparams(struct snd_pcm_substream *substream,
 	const struct snd_pcm_hardware *hw);
 
 int soc_dai_hw_params(struct snd_pcm_substream *substream,
-		      struct snd_pcm_hw_params *params,
-		      struct snd_soc_dai *dai);
+		struct snd_pcm_hw_params *params,
+		struct snd_soc_dai *dai);
 
 /* Jack reporting */
 int snd_soc_card_jack_new(struct snd_soc_card *card, const char *id, int type,
@@ -548,6 +559,8 @@ static inline void snd_soc_jack_free_gpios(struct snd_soc_jack *jack, int count,
 }
 #endif
 
+void snd_soc_card_change_online_state(struct snd_soc_card *soc_card,
+				      int online);
 struct snd_ac97 *snd_soc_alloc_ac97_component(struct snd_soc_component *component);
 struct snd_ac97 *snd_soc_new_ac97_component(struct snd_soc_component *component,
 	unsigned int id, unsigned int id_mask);
@@ -635,6 +648,8 @@ int snd_soc_get_strobe(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol);
 int snd_soc_put_strobe(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol);
+int snd_soc_info_multi_ext(struct snd_kcontrol *kcontrol,
+	struct snd_ctl_elem_info *uinfo);
 
 /**
  * struct snd_soc_jack_pin - Describes a pin to update based on jack detection
@@ -727,6 +742,7 @@ struct snd_soc_pcm_stream {
 	unsigned int channels_min;	/* min channels */
 	unsigned int channels_max;	/* max channels */
 	unsigned int sig_bits;		/* number of bits of content */
+	const char *aif_name;		/* DAPM AIF widget name */
 };
 
 /* SoC audio ops */
@@ -758,17 +774,19 @@ struct snd_soc_component_driver {
 	const struct snd_soc_dapm_route *dapm_routes;
 	unsigned int num_dapm_routes;
 
-	int (*probe)(struct snd_soc_component *);
-	void (*remove)(struct snd_soc_component *);
-	int (*suspend)(struct snd_soc_component *);
-	int (*resume)(struct snd_soc_component *);
+	int (*probe)(struct snd_soc_component *component);
+	void (*remove)(struct snd_soc_component *component);
+	int (*suspend)(struct snd_soc_component *component);
+	int (*resume)(struct snd_soc_component *component);
 
-	unsigned int (*read)(struct snd_soc_component *, unsigned int);
-	int (*write)(struct snd_soc_component *, unsigned int, unsigned int);
+	unsigned int (*read)(struct snd_soc_component *component,
+			     unsigned int reg);
+	int (*write)(struct snd_soc_component *component,
+		     unsigned int reg, unsigned int val);
 
 	/* pcm creation and destruction */
-	int (*pcm_new)(struct snd_soc_pcm_runtime *);
-	void (*pcm_free)(struct snd_pcm *);
+	int (*pcm_new)(struct snd_soc_pcm_runtime *rtd);
+	void (*pcm_free)(struct snd_pcm *pcm);
 
 	/* component wide operations */
 	int (*set_sysclk)(struct snd_soc_component *component,
@@ -784,9 +802,9 @@ struct snd_soc_component_driver {
 				 const char **dai_name);
 	int (*of_xlate_dai_id)(struct snd_soc_component *comment,
 			       struct device_node *endpoint);
-	void (*seq_notifier)(struct snd_soc_component *, enum snd_soc_dapm_type,
-		int subseq);
-	int (*stream_event)(struct snd_soc_component *, int event);
+	void (*seq_notifier)(struct snd_soc_component *component,
+			     enum snd_soc_dapm_type type, int subseq);
+	int (*stream_event)(struct snd_soc_component *component, int event);
 	int (*set_bias_level)(struct snd_soc_component *component,
 			      enum snd_soc_bias_level level);
 
@@ -796,6 +814,14 @@ struct snd_soc_component_driver {
 	/* probe ordering - for components with runtime dependencies */
 	int probe_order;
 	int remove_order;
+
+	/*
+	 * signal if the module handling the component should not be removed
+	 * if a pcm is open. Setting this would prevent the module
+	 * refcount being incremented in probe() but allow it be incremented
+	 * when a pcm is opened and decremented when it is closed.
+	 */
+	unsigned int module_get_upon_open:1;
 
 	/* bits */
 	unsigned int idle_bias_on:1;
@@ -808,8 +834,8 @@ struct snd_soc_component_driver {
 	const char *ignore_machine;
 	const char *topology_name_prefix;
 	int (*be_hw_params_fixup)(struct snd_soc_pcm_runtime *rtd,
-				  struct snd_pcm_hw_params *params);
-	bool use_dai_pcm_id;	/* use the DAI link PCM ID as PCM device number */
+				  struct snd_pcm_hw_params *params, int stream);
+	bool use_dai_pcm_id;	/* use DAI link PCM ID as PCM device number */
 	int be_pcm_base;	/* base device ID for all BE PCMs */
 };
 
@@ -842,10 +868,10 @@ struct snd_soc_component {
 	struct list_head dobj_list;
 
 	/*
-	* DO NOT use any of the fields below in drivers, they are temporary and
-	* are going to be removed again soon. If you use them in driver code the
-	* driver will be marked as BROKEN when these fields are removed.
-	*/
+	 * DO NOT use any of the fields below in drivers, they are temporary and
+	 * are going to be removed again soon. If you use them in driver code
+	 * the driver will be marked as BROKEN when these fields are removed.
+	 */
 
 	/* Don't use these, use snd_soc_component_get_dapm() */
 	struct snd_soc_dapm_context dapm;
@@ -877,10 +903,19 @@ struct snd_soc_dai_link_component {
 	const char *dai_name;
 };
 
+enum snd_soc_async_ops {
+	ASYNC_DPCM_SND_SOC_OPEN = 1 << 0,
+	ASYNC_DPCM_SND_SOC_CLOSE = 1 << 1,
+	ASYNC_DPCM_SND_SOC_PREPARE = 1 << 2,
+	ASYNC_DPCM_SND_SOC_HW_PARAMS = 1 << 3,
+	ASYNC_DPCM_SND_SOC_FREE = 1 << 4,
+};
+
 struct snd_soc_dai_link {
 	/* config - must be set by machine driver */
 	const char *name;			/* Codec name */
 	const char *stream_name;		/* Stream name */
+
 	/*
 	 * You MAY specify the link's CPU-side device, either by device name,
 	 * or by DT/OF node, but not both. If this information is omitted,
@@ -896,6 +931,7 @@ struct snd_soc_dai_link {
 	 * only, which only works well when that device exposes a single DAI.
 	 */
 	const char *cpu_dai_name;
+
 	/*
 	 * You MUST specify the link's codec, either by device name, or by
 	 * DT/OF node, but not both.
@@ -915,6 +951,7 @@ struct snd_soc_dai_link {
 	 */
 	const char *platform_name;
 	struct device_node *platform_of_node;
+
 	int id;	/* optional ID for machine driver link identification */
 
 	const struct snd_soc_pcm_stream *params;
@@ -929,7 +966,7 @@ struct snd_soc_dai_link {
 
 	/* optional hw_params re-writing for BE and FE sync */
 	int (*be_hw_params_fixup)(struct snd_soc_pcm_runtime *rtd,
-			struct snd_pcm_hw_params *params);
+			struct snd_pcm_hw_params *params, int stream);
 
 	/* machine stream operations */
 	const struct snd_soc_ops *ops;
@@ -956,6 +993,15 @@ struct snd_soc_dai_link {
 	/* This DAI link can route to other DAI links at runtime (Frontend)*/
 	unsigned int dynamic:1;
 
+	/* This DAI link can be reconfigured at runtime (Backend) */
+	unsigned int dynamic_be:1;
+
+	/*
+	 * This DAI can support no host IO (no pcm data is
+	 * copied to from host)
+	 */
+	unsigned int no_host_mode:2;
+
 	/* DPCM capture and Playback support */
 	unsigned int dpcm_capture:1;
 	unsigned int dpcm_playback:1;
@@ -975,7 +1021,58 @@ struct snd_soc_dai_link {
 
 	struct list_head list; /* DAI link list of the soc card */
 	struct snd_soc_dobj dobj; /* For topology */
+
+	/* this value determines what all ops can be started asynchronously */
+	enum snd_soc_async_ops async_ops;
 };
+/*
+#define for_each_link_codecs(link, i, codec)				\
+	for ((i) = 0;							\
+	     ((i) < link->num_codecs) && ((codec) = &link->codecs[i]);	\
+	     (i)++)
+
+#define for_each_link_platforms(link, i, platform)			\
+	for ((i) = 0;							\
+	     ((i) < link->num_platforms) &&				\
+	     ((platform) = &link->platforms[i]);			\
+	     (i)++)
+*/
+/*
+#define SND_SOC_DAILINK_REG1(name)	 SND_SOC_DAILINK_REG3(name##_cpus, name##_codecs, name##_platforms)
+#define SND_SOC_DAILINK_REG2(cpu, codec) SND_SOC_DAILINK_REG3(cpu, codec, null_dailink_component)
+#define SND_SOC_DAILINK_REG3(cpu, codec, platform)	\
+	.cpus		= cpu,				\
+	.num_cpus	= ARRAY_SIZE(cpu),		\
+	.codecs		= codec,			\
+	.num_codecs	= ARRAY_SIZE(codec),		\
+	.platforms	= platform,			\
+	.num_platforms	= ARRAY_SIZE(platform)
+
+#define SND_SOC_DAILINK_REGx(_1, _2, _3, func, ...) func
+#define SND_SOC_DAILINK_REG(...) \
+	SND_SOC_DAILINK_REGx(__VA_ARGS__,		\
+			SND_SOC_DAILINK_REG3,	\
+			SND_SOC_DAILINK_REG2,	\
+			SND_SOC_DAILINK_REG1)(__VA_ARGS__)
+
+#define SND_SOC_DAILINK_DEF(name, def...)		\
+	static struct snd_soc_dai_link_component name[]	= { def }
+
+#define SND_SOC_DAILINK_DEFS(name, cpu, codec, platform...)	\
+	SND_SOC_DAILINK_DEF(name##_cpus, cpu);			\
+	SND_SOC_DAILINK_DEF(name##_codecs, codec);		\
+	SND_SOC_DAILINK_DEF(name##_platforms, platform)
+
+#define DAILINK_COMP_ARRAY(param...)	param
+#define COMP_EMPTY()			{ }
+#define COMP_CPU(_dai)			{ .dai_name = _dai, }
+#define COMP_CODEC(_name, _dai)		{ .name = _name, .dai_name = _dai, }
+#define COMP_PLATFORM(_name)		{ .name = _name }
+#define COMP_AUX(_name)			{ .name = _name }
+#define COMP_DUMMY()			{ .name = "snd-soc-dummy", .dai_name = "snd-soc-dummy-dai", }
+
+extern struct snd_soc_dai_link_component null_dailink_component[0];
+*/
 
 struct snd_soc_codec_conf {
 	/*
@@ -1020,6 +1117,9 @@ struct snd_soc_card {
 
 	struct mutex mutex;
 	struct mutex dapm_mutex;
+	struct mutex dapm_power_mutex;
+
+	spinlock_t dpcm_lock;
 
 	bool instantiated;
 	bool topology_shortname_created;
@@ -1087,11 +1187,11 @@ struct snd_soc_card {
 	const struct snd_soc_dapm_route *of_dapm_routes;
 	int num_of_dapm_routes;
 	bool fully_routed;
-
 	struct work_struct deferred_resume_work;
 
 	/* lists of probed devices belonging to this card */
 	struct list_head component_dev_list;
+	struct list_head list;
 
 	struct list_head widgets;
 	struct list_head paths;
@@ -1114,6 +1214,35 @@ struct snd_soc_card {
 
 	void *drvdata;
 };
+/*
+#define for_each_card_prelinks(card, i, link)				\
+	for ((i) = 0;							\
+	     ((i) < (card)->num_links) && ((link) = &(card)->dai_link[i]); \
+	     (i)++)
+#define for_each_card_pre_auxs(card, i, aux)				\
+	for ((i) = 0;							\
+	     ((i) < (card)->num_aux_devs) && ((aux) = &(card)->aux_dev[i]); \
+	     (i)++)
+
+#define for_each_card_links(card, link)				\
+	list_for_each_entry(link, &(card)->dai_link_list, list)
+#define for_each_card_links_safe(card, link, _link)			\
+	list_for_each_entry_safe(link, _link, &(card)->dai_link_list, list)
+
+#define for_each_card_rtds(card, rtd)			\
+	list_for_each_entry(rtd, &(card)->rtd_list, list)
+#define for_each_card_rtds_safe(card, rtd, _rtd)	\
+	list_for_each_entry_safe(rtd, _rtd, &(card)->rtd_list, list)
+
+#define for_each_card_auxs(card, component)			\
+	list_for_each_entry(component, &card->aux_comp_list, card_aux_list)
+#define for_each_card_auxs_safe(card, component, _comp)	\
+	list_for_each_entry_safe(component, _comp,	\
+				 &card->aux_comp_list, card_aux_list)
+
+#define for_each_card_components(card, component)			\
+	list_for_each_entry(component, &(card)->component_dev_list, card_list)
+*/
 
 /* SoC machine DAI configuration, glues a codec and cpu DAI together */
 struct snd_soc_pcm_runtime {
@@ -1130,6 +1259,8 @@ struct snd_soc_pcm_runtime {
 
 	long pmdown_time;
 
+	/* err in case of ops failed */
+	int err_ops;
 	/* runtime devices */
 	struct snd_pcm *pcm;
 	struct snd_compr *compr;
@@ -1152,6 +1283,14 @@ struct snd_soc_pcm_runtime {
 	unsigned int dev_registered:1;
 	unsigned int pop_wait:1;
 };
+/*
+#define for_each_rtd_codec_dai(rtd, i, dai)\
+	for ((i) = 0;						       \
+	     ((i) < rtd->num_codecs) && ((dai) = rtd->codec_dais[i]); \
+	     (i)++)
+#define for_each_rtd_codec_dai_rollback(rtd, i, dai)		\
+	for (; ((--i) >= 0) && ((dai) = rtd->codec_dais[i]);)
+*/
 
 /* mixer control */
 struct soc_mixer_control {
@@ -1187,6 +1326,11 @@ struct soc_mreg_control {
 	unsigned int regbase, regcount, nbits, invert;
 };
 
+struct soc_multi_mixer_control {
+	int min, max, platform_max, count;
+	unsigned int reg, rreg, shift, rshift, invert;
+};
+
 /* enumerated kcontrol */
 struct soc_enum {
 	int reg;
@@ -1201,14 +1345,14 @@ struct soc_enum {
 };
 
 /**
- * snd_soc_dapm_to_component() - Casts a DAPM context to the component it is
- *  embedded in
- * @dapm: The DAPM context to cast to the component
- *
- * This function must only be used on DAPM contexts that are known to be part of
- * a component (e.g. in a component driver). Otherwise the behavior is
- * undefined.
- */
+  * snd_soc_dapm_to_component() - Casts a DAPM context to the component it is
+  *  embedded in
+  * @dapm: The DAPM context to cast to the component
+  *
+  * This function must only be used on DAPM contexts that are known to be part of
+  * a component (e.g. in a component driver). Otherwise the behavior is
+  * undefined.
+  */
 static inline struct snd_soc_component *snd_soc_dapm_to_component(
 	struct snd_soc_dapm_context *dapm)
 {
@@ -1216,10 +1360,10 @@ static inline struct snd_soc_component *snd_soc_dapm_to_component(
 }
 
 /**
- * snd_soc_component_get_dapm() - Returns the DAPM context associated with a
- *  component
- * @component: The component for which to get the DAPM context
- */
+  * snd_soc_component_get_dapm() - Returns the DAPM context associated with a
+  *  component
+  * @component: The component for which to get the DAPM context
+  */
 static inline struct snd_soc_dapm_context *snd_soc_component_get_dapm(
 	struct snd_soc_component *component)
 {
@@ -1227,26 +1371,26 @@ static inline struct snd_soc_dapm_context *snd_soc_component_get_dapm(
 }
 
 /**
- * snd_soc_component_init_bias_level() - Initialize COMPONENT DAPM bias level
- * @component: The COMPONENT for which to initialize the DAPM bias level
- * @level: The DAPM level to initialize to
- *
- * Initializes the COMPONENT DAPM bias level. See snd_soc_dapm_init_bias_level().
- */
+  * snd_soc_component_init_bias_level() - Initialize COMPONENT DAPM bias level
+  * @component: The COMPONENT for which to initialize the DAPM bias level
+  * @level: The DAPM level to initialize to
+  *
+  * Initializes the COMPONENT DAPM bias level. See snd_soc_dapm_init_bias_level().
+  */
 static inline void
 snd_soc_component_init_bias_level(struct snd_soc_component *component,
-				  enum snd_soc_bias_level level)
+				enum snd_soc_bias_level level)
 {
 	snd_soc_dapm_init_bias_level(
 		snd_soc_component_get_dapm(component), level);
 }
 
 /**
- * snd_soc_component_get_bias_level() - Get current COMPONENT DAPM bias level
- * @component: The COMPONENT for which to get the DAPM bias level
- *
- * Returns: The current DAPM bias level of the COMPONENT.
- */
+  * snd_soc_component_get_bias_level() - Get current COMPONENT DAPM bias level
+  * @component: The COMPONENT for which to get the DAPM bias level
+  *
+  * Returns: The current DAPM bias level of the COMPONENT.
+  */
 static inline enum snd_soc_bias_level
 snd_soc_component_get_bias_level(struct snd_soc_component *component)
 {
@@ -1255,13 +1399,13 @@ snd_soc_component_get_bias_level(struct snd_soc_component *component)
 }
 
 /**
- * snd_soc_component_force_bias_level() - Set the COMPONENT DAPM bias level
- * @component: The COMPONENT for which to set the level
- * @level: The level to set to
- *
- * Forces the COMPONENT bias level to a specific state. See
- * snd_soc_dapm_force_bias_level().
- */
+  * snd_soc_component_force_bias_level() - Set the COMPONENT DAPM bias level
+  * @component: The COMPONENT for which to set the level
+  * @level: The level to set to
+  *
+  * Forces the COMPONENT bias level to a specific state. See
+  * snd_soc_dapm_force_bias_level().
+  */
 static inline int
 snd_soc_component_force_bias_level(struct snd_soc_component *component,
 				   enum snd_soc_bias_level level)
@@ -1272,12 +1416,12 @@ snd_soc_component_force_bias_level(struct snd_soc_component *component,
 }
 
 /**
- * snd_soc_dapm_kcontrol_component() - Returns the component associated to a kcontrol
- * @kcontrol: The kcontrol
- *
- * This function must only be used on DAPM contexts that are known to be part of
- * a COMPONENT (e.g. in a COMPONENT driver). Otherwise the behavior is undefined.
- */
+  * snd_soc_dapm_kcontrol_component() - Returns the component associated to a kcontrol
+  * @kcontrol: The kcontrol
+  *
+  * This function must only be used on DAPM contexts that are known to be part of
+  * a COMPONENT (e.g. in a COMPONENT driver). Otherwise the behavior is undefined.
+  */
 static inline struct snd_soc_component *snd_soc_dapm_kcontrol_component(
 	struct snd_kcontrol *kcontrol)
 {
@@ -1285,11 +1429,11 @@ static inline struct snd_soc_component *snd_soc_dapm_kcontrol_component(
 }
 
 /**
- * snd_soc_component_cache_sync() - Sync the register cache with the hardware
- * @component: COMPONENT to sync
- *
- * Note: This function will call regcache_sync()
- */
+  * snd_soc_component_cache_sync() - Sync the register cache with the hardware
+  * @component: COMPONENT to sync
+  *
+  * Note: This function will call regcache_sync()
+  */
 static inline int snd_soc_component_cache_sync(
 	struct snd_soc_component *component)
 {
@@ -1310,13 +1454,15 @@ int snd_soc_component_update_bits_async(struct snd_soc_component *component,
 void snd_soc_component_async_complete(struct snd_soc_component *component);
 int snd_soc_component_test_bits(struct snd_soc_component *component,
 	unsigned int reg, unsigned int mask, unsigned int value);
+struct snd_soc_component *soc_find_component(
+	const struct device_node *of_node, const char *name);
 
 /* component wide operations */
 int snd_soc_component_set_sysclk(struct snd_soc_component *component,
 			int clk_id, int source, unsigned int freq, int dir);
 int snd_soc_component_set_pll(struct snd_soc_component *component, int pll_id,
 			      int source, unsigned int freq_in,
-			      unsigned int freq_out);
+			       unsigned int freq_out);
 int snd_soc_component_set_jack(struct snd_soc_component *component,
 			       struct snd_soc_jack *jack, void *data);
 
@@ -1483,7 +1629,34 @@ struct snd_soc_dai *snd_soc_card_get_codec_dai(struct snd_soc_card *card,
 
 	return NULL;
 }
+/*
+static inline
+int snd_soc_fixup_dai_links_platform_name(struct snd_soc_card *card,
+					  const char *platform_name)
+{
+	struct snd_soc_dai_link *dai_link;
+	const char *name;
+	int i;
 
+	if (!platform_name) // nothing to do 
+		return 0;
+
+	// set platform name for each dailink 
+	for_each_card_prelinks(card, i, dai_link) {
+		name = devm_kstrdup(card->dev, platform_name, GFP_KERNEL);
+		if (!name)
+			return -ENOMEM;
+
+		if (!dai_link->platforms)
+			return -EINVAL;
+
+		// only single platform is supported for now 
+		dai_link->platforms->name = name;
+	}
+
+	return 0;
+}
+*/
 #ifdef CONFIG_DEBUG_FS
 extern struct dentry *snd_soc_debugfs_root;
 #endif
