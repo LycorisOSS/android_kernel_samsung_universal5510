@@ -2233,7 +2233,71 @@ int usb_hcd_get_frame_number (struct usb_device *udev)
 	return hcd->driver->get_frame_number (hcd);
 }
 
+int usb_hcd_sec_event_ring_setup(struct usb_device *udev,
+	unsigned int intr_num)
+{
+	struct usb_hcd	*hcd = bus_to_hcd(udev->bus);
+
+	if (!HCD_RH_RUNNING(hcd))
+		return 0;
+
+	return hcd->driver->sec_event_ring_setup(hcd, intr_num);
+}
+
+int usb_hcd_sec_event_ring_cleanup(struct usb_device *udev,
+	unsigned int intr_num)
+{
+	struct usb_hcd	*hcd = bus_to_hcd(udev->bus);
+
+	if (!HCD_RH_RUNNING(hcd))
+		return 0;
+
+	return hcd->driver->sec_event_ring_cleanup(hcd, intr_num);
+}
+
 /*-------------------------------------------------------------------------*/
+
+phys_addr_t
+usb_hcd_get_sec_event_ring_phys_addr(struct usb_device *udev,
+	unsigned int intr_num, dma_addr_t *dma)
+{
+	struct usb_hcd	*hcd = bus_to_hcd(udev->bus);
+
+	if (!HCD_RH_RUNNING(hcd))
+		return 0;
+
+	return hcd->driver->get_sec_event_ring_phys_addr(hcd, intr_num, dma);
+}
+
+phys_addr_t
+usb_hcd_get_xfer_ring_phys_addr(struct usb_device *udev,
+		struct usb_host_endpoint *ep, dma_addr_t *dma)
+{
+	struct usb_hcd	*hcd = bus_to_hcd(udev->bus);
+
+	if (!HCD_RH_RUNNING(hcd))
+		return 0;
+
+	return hcd->driver->get_xfer_ring_phys_addr(hcd, udev, ep, dma);
+}
+
+int usb_hcd_get_controller_id(struct usb_device *udev)
+{
+	struct usb_hcd	*hcd = bus_to_hcd(udev->bus);
+
+	if (!HCD_RH_RUNNING(hcd))
+		return -EINVAL;
+
+	return hcd->driver->get_core_id(hcd);
+}
+
+int usb_hcd_stop_endpoint(struct usb_device *udev,
+		struct usb_host_endpoint *ep)
+{
+	struct usb_hcd	*hcd = bus_to_hcd(udev->bus);
+
+	return hcd->driver->stop_endpoint(hcd, udev, ep);
+}
 
 #ifdef	CONFIG_PM
 
@@ -2243,7 +2307,7 @@ int hcd_bus_suspend(struct usb_device *rhdev, pm_message_t msg)
 	int		status;
 	int		old_state = hcd->state;
 
-	dev_dbg(&rhdev->dev, "bus %ssuspend, wakeup %d\n",
+	dev_info(&rhdev->dev, "bus %ssuspend, wakeup %d\n",
 			(PMSG_IS_AUTO(msg) ? "auto-" : ""),
 			rhdev->do_remote_wakeup);
 	if (HCD_DEAD(hcd)) {
@@ -2287,6 +2351,11 @@ int hcd_bus_suspend(struct usb_device *rhdev, pm_message_t msg)
 		dev_dbg(&rhdev->dev, "bus %s fail, err %d\n",
 				"suspend", status);
 	}
+
+	/* L2 suspend only support USB2.0port */
+	if (hcd->state == HC_STATE_SUSPENDED)
+		hcd->driver->wake_lock(hcd, 0);
+
 	return status;
 }
 
@@ -2296,7 +2365,7 @@ int hcd_bus_resume(struct usb_device *rhdev, pm_message_t msg)
 	int		status;
 	int		old_state = hcd->state;
 
-	dev_dbg(&rhdev->dev, "usb %sresume\n",
+	dev_info(&rhdev->dev, "usb %sresume\n",
 			(PMSG_IS_AUTO(msg) ? "auto-" : ""));
 	if (HCD_DEAD(hcd)) {
 		dev_dbg(&rhdev->dev, "skipped %s of dead bus\n", "resume");
@@ -2321,6 +2390,9 @@ int hcd_bus_resume(struct usb_device *rhdev, pm_message_t msg)
 	if (status == 0) {
 		struct usb_device *udev;
 		int port1;
+
+		if (hcd->state == HC_STATE_RESUMING)
+			hcd->driver->wake_lock(hcd, 1);
 
 		spin_lock_irq(&hcd_root_hub_lock);
 		if (!HCD_DEAD(hcd)) {
@@ -2503,6 +2575,7 @@ void usb_hc_died (struct usb_hcd *hcd)
 	}
 	spin_unlock_irqrestore (&hcd_root_hub_lock, flags);
 	/* Make sure that the other roothub is also deallocated. */
+	usb_atomic_notify_dead_bus(&hcd->self);
 }
 EXPORT_SYMBOL_GPL (usb_hc_died);
 
