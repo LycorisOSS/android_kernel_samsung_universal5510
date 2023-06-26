@@ -50,9 +50,12 @@ int of_i2c_get_board_info(struct device *dev, struct device_node *node,
 		addr &= ~I2C_OWN_SLAVE_ADDRESS;
 		info->flags |= I2C_CLIENT_SLAVE;
 	}
+	if (of_get_property(node, "i2c-speedy-address", NULL))
+		info->flags |= I2C_CLIENT_SPEEDY;
 
 	info->addr = addr;
 	info->of_node = node;
+	info->fwnode = of_fwnode_handle(node);
 
 	if (of_property_read_bool(node, "host-notify"))
 		info->flags |= I2C_CLIENT_HOST_NOTIFY;
