@@ -33,8 +33,6 @@
 #include <linux/cpufreq.h>
 #include <linux/cpuidle.h>
 #include <linux/timer.h>
-#include <linux/wakeup_reason.h>
-#include <linux/sec_debug.h>
 
 #include "../base.h"
 #include "power.h"
@@ -125,10 +123,6 @@ void device_pm_unlock(void)
  */
 void device_pm_add(struct device *dev)
 {
-	/* Skip PM setup/initialization. */
-	if (device_pm_not_required(dev))
-		return;
-
 	pr_debug("PM: Adding info for %s:%s\n",
 		 dev->bus ? dev->bus->name : "No Bus", dev_name(dev));
 	device_pm_check_callbacks(dev);
@@ -147,9 +141,6 @@ void device_pm_add(struct device *dev)
  */
 void device_pm_remove(struct device *dev)
 {
-	if (device_pm_not_required(dev))
-		return;
-
 	pr_debug("PM: Removing info for %s:%s\n",
 		 dev->bus ? dev->bus->name : "No Bus", dev_name(dev));
 	complete_all(&dev->power.completion);
@@ -516,9 +507,6 @@ static void dpm_watchdog_handler(struct timer_list *t)
 	struct dpm_watchdog *wd = from_timer(wd, t, timer);
 
 	dev_emerg(wd->dev, "**** DPM device timeout ****\n");
-#ifdef CONFIG_SEC_DEBUG_EXTRA_INFO
-	secdbg_exin_set_dpm_timeout((char *)dev_name(wd->dev));
-#endif
 	show_stack(wd->tsk, NULL);
 	panic("%s %s: unrecoverable failure\n",
 		dev_driver_string(wd->dev), dev_name(wd->dev));
@@ -1367,8 +1355,6 @@ Run:
 	error = dpm_run_callback(callback, dev, state, info);
 	if (error) {
 		async_error = error;
-		log_suspend_abort_reason("Callback failed on %s in %pS returned %d",
-					 dev_name(dev), callback, error);
 		goto Complete;
 	}
 
@@ -1583,8 +1569,6 @@ Run:
 	error = dpm_run_callback(callback, dev, state, info);
 	if (error) {
 		async_error = error;
-		log_suspend_abort_reason("Callback failed on %s in %pS returned %d",
-					 dev_name(dev), callback, error);
 		goto Complete;
 	}
 	dpm_propagate_wakeup_to_parent(dev);
@@ -1855,9 +1839,6 @@ static int __device_suspend(struct device *dev, pm_message_t state, bool async)
 
 		dpm_propagate_wakeup_to_parent(dev);
 		dpm_clear_superiors_direct_complete(dev);
-	} else {
-		log_suspend_abort_reason("Callback failed on %s in %pS returned %d",
-					 dev_name(dev), callback, error);
 	}
 
 	device_unlock(dev);
@@ -1881,10 +1862,6 @@ static void async_suspend(void *data, async_cookie_t cookie)
 	if (error) {
 		dpm_save_failed_dev(dev_name(dev));
 		pm_dev_err(dev, pm_transition, " async", error);
-#ifdef CONFIG_SEC_PM_DEBUG
-		log_suspend_abort_reason("Device %s failed to suspend async: %d",
-				dev_name(dev), error);
-#endif
 	}
 
 	put_device(dev);
@@ -1932,10 +1909,6 @@ int dpm_suspend(pm_message_t state)
 		if (error) {
 			pm_dev_err(dev, state, "", error);
 			dpm_save_failed_dev(dev_name(dev));
-#ifdef CONFIG_SEC_PM_DEBUG
-			log_suspend_abort_reason("Device %s failed to suspend: %d",
-					dev_name(dev), error);
-#endif
 			put_device(dev);
 			break;
 		}
@@ -2080,9 +2053,6 @@ int dpm_prepare(pm_message_t state)
 			printk(KERN_INFO "PM: Device %s not prepared "
 				"for power transition: code %d\n",
 				dev_name(dev), error);
-			log_suspend_abort_reason("Device %s not prepared for power transition: code %d",
-						 dev_name(dev), error);
-			dpm_save_failed_dev(dev_name(dev));
 			put_device(dev);
 			break;
 		}

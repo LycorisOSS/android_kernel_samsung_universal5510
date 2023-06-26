@@ -10,35 +10,13 @@
 #include <linux/swap.h>
 #include <linux/sched/signal.h>
 
-#include <asm/cacheflush.h>
-
 #include "ion.h"
 
-/*
- * We avoid atomic_long_t to minimize cache flushes at the cost of possible
- * race which would result in a small accounting inaccuracy that we can
- * tolerate.
- */
-static long nr_total_pages;
-
-static void *ion_page_pool_alloc_pages(struct ion_page_pool *pool, bool nozero)
+static inline struct page *ion_page_pool_alloc_pages(struct ion_page_pool *pool)
 {
-	gfp_t gfpmask = pool->gfp_mask;
-	struct page *page;
-
 	if (fatal_signal_pending(current))
 		return NULL;
-
-	if (nozero)
-		gfpmask &= ~__GFP_ZERO;
-
-	page = alloc_pages(gfpmask, pool->order);
-	if (!page) {
-		if (pool->order == 0)
-			perrfn("failed to alloc order-0 page (gfp %pGg)", &gfpmask);
-		return NULL;
-	}
-	return page;
+	return alloc_pages(pool->gfp_mask, pool->order);
 }
 
 static void ion_page_pool_free_pages(struct ion_page_pool *pool,
@@ -58,9 +36,8 @@ static void ion_page_pool_add(struct ion_page_pool *pool, struct page *page)
 		pool->low_count++;
 	}
 
-	nr_total_pages += 1 << pool->order;
-	mod_node_page_state(page_pgdat(page), NR_KERNEL_MISC_RECLAIMABLE,
-							1 << pool->order);
+	mod_node_page_state(page_pgdat(page), NR_INDIRECTLY_RECLAIMABLE_BYTES,
+			    (1 << (PAGE_SHIFT + pool->order)));
 	mutex_unlock(&pool->mutex);
 }
 
@@ -79,13 +56,12 @@ static struct page *ion_page_pool_remove(struct ion_page_pool *pool, bool high)
 	}
 
 	list_del(&page->lru);
-	nr_total_pages -= 1 << pool->order;
-	mod_node_page_state(page_pgdat(page), NR_KERNEL_MISC_RECLAIMABLE,
-							-(1 << pool->order));
+	mod_node_page_state(page_pgdat(page), NR_INDIRECTLY_RECLAIMABLE_BYTES,
+			    -(1 << (PAGE_SHIFT + pool->order)));
 	return page;
 }
 
-struct page *ion_page_pool_alloc(struct ion_page_pool *pool, bool nozero)
+struct page *ion_page_pool_alloc(struct ion_page_pool *pool)
 {
 	struct page *page = NULL;
 
@@ -99,7 +75,7 @@ struct page *ion_page_pool_alloc(struct ion_page_pool *pool, bool nozero)
 	mutex_unlock(&pool->mutex);
 
 	if (!page)
-		return ion_page_pool_alloc_pages(pool, nozero);
+		page = ion_page_pool_alloc_pages(pool);
 
 	return page;
 }
@@ -119,14 +95,6 @@ static int ion_page_pool_total(struct ion_page_pool *pool, bool high)
 		count += pool->high_count;
 
 	return count << pool->order;
-}
-
-long ion_page_pool_nr_pages(void)
-{
-	/* Correct possible overflow caused by racing writes */
-	if (nr_total_pages < 0)
-		nr_total_pages = 0;
-	return nr_total_pages;
 }
 
 int ion_page_pool_shrink(struct ion_page_pool *pool, gfp_t gfp_mask,

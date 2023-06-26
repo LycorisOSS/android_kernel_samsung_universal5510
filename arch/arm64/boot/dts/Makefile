@@ -1,16 +1,28 @@
 # SPDX-License-Identifier: GPL-2.0
-dtb-y += exynos/s5e5515_nocp.dtb
-dtbo-y += samsung/exynos5515-freshbs_na_open_00.dtbo
-dtbo-y += samsung/exynos5515-freshbs_na_open_01.dtbo
-dtbo-y += samsung/exynos5515-freshbs_na_open_03.dtbo
-dtbo-y += samsung/exynos5515-freshbs_na_open_04.dtbo
-dtbo-y += samsung/exynos5515-freshbs_na_open_05.dtbo
-dtbo-y += samsung/exynos5515-freshbs_na_open_15.dtbo
-
-targets += dtbs
-DTB_LIST  := $(dtb-y) $(dtbo-y)
-always    := $(DTB_LIST)
-
-dtbs: $(addprefix $(obj)/, $(DTB_LIST))
-
-clean-files := *.dtb*
+subdir-y += actions
+subdir-y += al
+subdir-y += allwinner
+subdir-y += altera
+subdir-y += amd
+subdir-y += amlogic
+subdir-y += apm
+subdir-y += arm
+subdir-y += broadcom
+subdir-y += cavium
+subdir-y += exynos
+subdir-y += freescale
+subdir-y += hisilicon
+subdir-y += lg
+subdir-y += marvell
+subdir-y += mediatek
+subdir-y += nvidia
+subdir-y += qcom
+subdir-y += realtek
+subdir-y += renesas
+subdir-y += rockchip
+subdir-y += socionext
+subdir-y += sprd
+subdir-y += synaptics
+subdir-y += ti
+subdir-y += xilinx
+subdir-y += zte

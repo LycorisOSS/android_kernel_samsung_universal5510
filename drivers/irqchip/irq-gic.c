@@ -352,8 +352,6 @@ static void __exception_irq_entry gic_handle_irq(struct pt_regs *regs)
 		irqstat = readl_relaxed(cpu_base + GIC_CPU_INTACK);
 		irqnr = irqstat & GICC_IAR_INT_ID_MASK;
 
-		dmb(ish);
-
 		if (likely(irqnr > 15 && irqnr < 1020)) {
 			if (static_branch_likely(&supports_deactivate_key))
 				writel_relaxed(irqstat, cpu_base + GIC_CPU_EOI);
@@ -1007,7 +1005,7 @@ static int gic_irq_domain_translate(struct irq_domain *d,
 		*type = fwspec->param[2] & IRQ_TYPE_SENSE_MASK;
 
 		/* Make it clear that broken DTs are... broken */
-		WARN(*type == IRQ_TYPE_NONE, "Interrupt of type IRQ_TYPE_NONE is not allowed. hwirq:%lu", *hwirq);
+		WARN_ON(*type == IRQ_TYPE_NONE);
 		return 0;
 	}
 

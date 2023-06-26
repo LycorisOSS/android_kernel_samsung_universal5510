@@ -70,7 +70,7 @@
  * Common stuff for both V4L1 and V4L2
  * Moved from videodev.h
  */
-#define VIDEO_MAX_FRAME               64
+#define VIDEO_MAX_FRAME               32
 #define VIDEO_MAX_PLANES               8
 
 /*
@@ -471,7 +471,6 @@ struct v4l2_capability {
 #define V4L2_CAP_STREAMING              0x04000000  /* streaming I/O ioctls */
 
 #define V4L2_CAP_TOUCH                  0x10000000  /* Is a touch device */
-#define V4L2_CAP_FENCES                 0x20000000  /* Supports explicit synchronization */
 
 #define V4L2_CAP_DEVICE_CAPS            0x80000000  /* sets device capabilities field */
 
@@ -564,14 +563,6 @@ struct v4l2_pix_format {
 #define V4L2_PIX_FMT_NV61    v4l2_fourcc('N', 'V', '6', '1') /* 16  Y/CrCb 4:2:2  */
 #define V4L2_PIX_FMT_NV24    v4l2_fourcc('N', 'V', '2', '4') /* 24  Y/CbCr 4:4:4  */
 #define V4L2_PIX_FMT_NV42    v4l2_fourcc('N', 'V', '4', '2') /* 24  Y/CrCb 4:4:4  */
-
-/* NV12_512 8-bit Y/CbCr 4:2:0  */
-#define V4L2_PIX_FMT_NV12_512         v4l2_fourcc('Q', '5', '1', '2')
-
-/* UBWC 8-bit Y/CbCr 4:2:0  */
-#define V4L2_PIX_FMT_NV12_UBWC        v4l2_fourcc('Q', '1', '2', '8')
-/* UBWC 10-bit Y/CbCr 4:2:0 */
-#define V4L2_PIX_FMT_NV12_TP10_UBWC   v4l2_fourcc('Q', '1', '2', 'A')
 
 /* two non contiguous planes - one Y, one Cr + Cb interleaved  */
 #define V4L2_PIX_FMT_NV12M   v4l2_fourcc('N', 'M', '1', '2') /* 12  Y/CbCr 4:2:0  */
@@ -702,8 +693,6 @@ struct v4l2_pix_format {
 #define V4L2_PIX_FMT_IPU3_SGBRG10	v4l2_fourcc('i', 'p', '3', 'g') /* IPU3 packed 10-bit GBRG bayer */
 #define V4L2_PIX_FMT_IPU3_SGRBG10	v4l2_fourcc('i', 'p', '3', 'G') /* IPU3 packed 10-bit GRBG bayer */
 #define V4L2_PIX_FMT_IPU3_SRGGB10	v4l2_fourcc('i', 'p', '3', 'r') /* IPU3 packed 10-bit RGGB bayer */
-#define V4L2_PIX_FMT_SDE_Y_CBCR_H2V2_P010_VENUS \
-	v4l2_fourcc('Q', 'P', '1', '0') /* Y/CbCr 4:2:0 P10 Venus*/
 
 /* SDR formats - used only for Software Defined Radio devices */
 #define V4L2_SDR_FMT_CU8          v4l2_fourcc('C', 'U', '0', '8') /* IQ u8 */
@@ -746,7 +735,6 @@ struct v4l2_fmtdesc {
 
 #define V4L2_FMT_FLAG_COMPRESSED 0x0001
 #define V4L2_FMT_FLAG_EMULATED   0x0002
-#define V4L2_FMT_FLAG_UNORDERED  0x0004
 
 	/* Frame Size and frame rate enumeration */
 /*
@@ -964,10 +952,7 @@ struct v4l2_buffer {
 	} m;
 	__u32			length;
 	__u32			reserved2;
-	union {
-		__s32		fence_fd;
-		__u32		reserved;
-	};
+	__u32			reserved;
 };
 
 /*  Flags for 'flags' field */
@@ -1003,8 +988,6 @@ struct v4l2_buffer {
 #define V4L2_BUF_FLAG_TSTAMP_SRC_SOE		0x00010000
 /* mem2mem encoder/decoder */
 #define V4L2_BUF_FLAG_LAST			0x00100000
-#define V4L2_BUF_FLAG_IN_FENCE			0x00200000
-#define V4L2_BUF_FLAG_OUT_FENCE			0x00400000
 
 /**
  * struct v4l2_exportbuffer - export of video buffer as DMABUF file descriptor

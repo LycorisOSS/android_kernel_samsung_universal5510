@@ -238,8 +238,6 @@ source security/loadpin/Kconfig
 source security/yama/Kconfig
 
 source security/integrity/Kconfig
-source security/samsung/defex_lsm/Kconfig
-source security/samsung/dsms/Kconfig
 
 choice
 	prompt "Default security module"
@@ -277,8 +275,6 @@ config DEFAULT_SECURITY
 	default "tomoyo" if DEFAULT_SECURITY_TOMOYO
 	default "apparmor" if DEFAULT_SECURITY_APPARMOR
 	default "" if DEFAULT_SECURITY_DAC
-
-source "security/Kconfig.hardening"
 
 endmenu
 

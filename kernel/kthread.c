@@ -11,7 +11,6 @@
 #include <linux/kthread.h>
 #include <linux/completion.h>
 #include <linux/err.h>
-#include <linux/cgroup.h>
 #include <linux/cpuset.h>
 #include <linux/unistd.h>
 #include <linux/file.h>

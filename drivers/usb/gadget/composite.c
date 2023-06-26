@@ -470,122 +470,6 @@ int usb_interface_id(struct usb_configuration *config,
 }
 EXPORT_SYMBOL_GPL(usb_interface_id);
 
-static int usb_func_wakeup_int(struct usb_function *func)
-{
-	int ret;
-	struct usb_gadget *gadget;
-
-	if (!func || !func->config || !func->config->cdev ||
-		!func->config->cdev->gadget)
-		return -EINVAL;
-
-	pr_debug("%s - %s function wakeup\n",
-		__func__, func->name ? func->name : "");
-
-	gadget = func->config->cdev->gadget;
-	if ((gadget->speed != USB_SPEED_SUPER) || !func->func_wakeup_allowed) {
-		DBG(func->config->cdev,
-			"Function Wakeup is not possible. speed=%u, func_wakeup_allowed=%u\n",
-			gadget->speed,
-			func->func_wakeup_allowed);
-
-		return -ENOTSUPP;
-	}
-
-	ret = usb_gadget_func_wakeup(gadget, func->intf_id);
-
-	return ret;
-}
-
-/**
- * usb_func_wakeup - wakes up a composite device function.
- * @func: composite device function to wake up.
- *
- * Returns 0 on success or a negative error value.
- */
-int usb_func_wakeup(struct usb_function *func)
-{
-	int ret;
-	unsigned long flags;
-
-	if (!func || !func->config || !func->config->cdev)
-		return -EINVAL;
-
-	pr_debug("%s function wakeup\n",
-		func->name ? func->name : "");
-
-	spin_lock_irqsave(&func->config->cdev->lock, flags);
-	ret = usb_func_wakeup_int(func);
-	if (ret == -EAGAIN) {
-		DBG(func->config->cdev,
-			"Function wakeup for %s could not complete due to suspend state. Delayed until after bus resume.\n",
-			func->name ? func->name : "");
-		ret = 0;
-	} else if (ret < 0 && ret != -ENOTSUPP) {
-		ERROR(func->config->cdev,
-			"Failed to wake function %s from suspend state. ret=%d. Canceling USB request.\n",
-			func->name ? func->name : "", ret);
-	}
-
-	spin_unlock_irqrestore(&func->config->cdev->lock, flags);
-	return ret;
-}
-EXPORT_SYMBOL_GPL(usb_func_wakeup);
-
-/**
- * usb_func_ep_queue - queues (submits) an I/O request to a function endpoint.
- * This function is similar to the usb_ep_queue function, but in addition it
- * also checks whether the function is in Super Speed USB Function Suspend
- * state, and if so a Function Wake notification is sent to the host
- * (USB 3.0 spec, section 9.2.5.2).
- * @func: the function which issues the USB I/O request.
- * @ep:the endpoint associated with the request
- * @req:the request being submitted
- * @gfp_flags: GFP_* flags to use in case the lower level driver couldn't
- * pre-allocate all necessary memory with the request.
- */
-int usb_func_ep_queue(struct usb_function *func, struct usb_ep *ep,
-			       struct usb_request *req, gfp_t gfp_flags)
-{
-	int ret;
-	struct usb_gadget *gadget;
-
-	if (!func || !func->config || !func->config->cdev ||
-			!func->config->cdev->gadget || !ep || !req) {
-		ret = -EINVAL;
-		goto done;
-	}
-
-	pr_debug("Function %s queueing new data into ep %u\n",
-		func->name ? func->name : "", ep->address);
-
-	gadget = func->config->cdev->gadget;
-	if (func->func_is_suspended && func->func_wakeup_allowed) {
-		ret = usb_gadget_func_wakeup(gadget, func->intf_id);
-		if (ret == -EAGAIN) {
-			pr_debug("bus suspended func wakeup for %s delayed until bus resume.\n",
-				 func->name ? func->name : "");
-		} else if (ret < 0 && ret != -ENOTSUPP) {
-			pr_err("Failed to wake function %s from suspend state. ret=%d.\n",
-			       func->name ? func->name : "", ret);
-		}
-		goto done;
-	}
-
-	if (!func->func_is_suspended)
-		ret = 0;
-
-	if (func->func_is_suspended && !func->func_wakeup_allowed) {
-		ret = -ENOTSUPP;
-		goto done;
-	}
-
-	ret = usb_ep_queue(ep, req, gfp_flags);
-done:
-	return ret;
-}
-EXPORT_SYMBOL_GPL(usb_func_ep_queue);
-
 static u8 encode_bMaxPower(enum usb_device_speed speed,
 		struct usb_configuration *c)
 {
@@ -1740,18 +1624,6 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 	struct usb_function		*f = NULL;
 	u8				endp;
 
-	if (w_length > USB_COMP_EP0_BUFSIZ) {
-		if (ctrl->bRequestType & USB_DIR_IN) {
-			/* Cast away the const, we are going to overwrite on purpose. */
-			__le16 *temp = (__le16 *)&ctrl->wLength;
-
-			*temp = cpu_to_le16(USB_COMP_EP0_BUFSIZ);
-			w_length = USB_COMP_EP0_BUFSIZ;
-		} else {
-			goto done;
-		}
-	}
-
 	/* partial re-init of the response message; the function or the
 	 * gadget might need to intercept e.g. a control-OUT completion
 	 * when we delegate to it.
@@ -2036,9 +1908,6 @@ unknown:
 				if (w_index != 0x5 || (w_value >> 8))
 					break;
 				interface = w_value & 0xFF;
-				if (interface >= MAX_CONFIG_INTERFACES ||
-				    !os_desc_cfg->interface[interface])
-					break;
 				buf[6] = w_index;
 				count = count_ext_prop(os_desc_cfg,
 					interface);
@@ -2268,7 +2137,7 @@ int composite_dev_prepare(struct usb_composite_driver *composite,
 	if (!cdev->req)
 		return -ENOMEM;
 
-	cdev->req->buf = kzalloc(USB_COMP_EP0_BUFSIZ, GFP_KERNEL);
+	cdev->req->buf = kmalloc(USB_COMP_EP0_BUFSIZ, GFP_KERNEL);
 	if (!cdev->req->buf)
 		goto fail;
 

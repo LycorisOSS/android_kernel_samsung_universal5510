@@ -32,7 +32,6 @@
 #include <linux/perf_event.h>
 #include <linux/preempt.h>
 #include <linux/hugetlb.h>
-#include <linux/sec_debug.h>
 
 #include <asm/bug.h>
 #include <asm/cmpxchg.h>
@@ -40,7 +39,6 @@
 #include <asm/exception.h>
 #include <asm/debug-monitors.h>
 #include <asm/esr.h>
-#include <asm/kasan.h>
 #include <asm/sysreg.h>
 #include <asm/system_misc.h>
 #include <asm/pgtable.h>
@@ -127,29 +125,6 @@ static void mem_abort_decode(unsigned int esr)
 		data_abort_decode(esr);
 }
 
-static inline phys_addr_t show_virt_to_phys(unsigned long addr)
-{
-	if (!is_vmalloc_addr((void *)addr) ||
-		(addr >= (unsigned long) KERNEL_START &&
-		 addr <= (unsigned long) KERNEL_END))
-		return __pa(addr);
-	else
-		return page_to_phys(vmalloc_to_page((void *)addr)) +
-		       offset_in_page(addr);
-}
-
-static inline bool is_ttbr0_addr(unsigned long addr)
-{
-	/* entry assembly clears tags for TTBR0 addrs */
-	return addr < TASK_SIZE;
-}
-
-static inline bool is_ttbr1_addr(unsigned long addr)
-{
-	/* TTBR1 addresses may have a tag if KASAN_SW_TAGS is in use */
-	return arch_kasan_reset_tag(addr) >= VA_START;
-}
-
 /*
  * Dump out the page tables associated with 'addr' in the currently active mm.
  */
@@ -159,7 +134,7 @@ void show_pte(unsigned long addr)
 	pgd_t *pgdp;
 	pgd_t pgd;
 
-	if (is_ttbr0_addr(addr)) {
+	if (addr < TASK_SIZE) {
 		/* TTBR0 */
 		mm = current->active_mm;
 		if (mm == &init_mm) {
@@ -167,7 +142,7 @@ void show_pte(unsigned long addr)
 				 addr);
 			return;
 		}
-	} else if (is_ttbr1_addr(addr)) {
+	} else if (addr >= VA_START) {
 		/* TTBR1 */
 		mm = &init_mm;
 	} else {
@@ -273,7 +248,7 @@ static inline bool is_el1_permission_fault(unsigned int esr,
 	if (fsc_type == ESR_ELx_FSC_PERM)
 		return true;
 
-	if (is_ttbr0_addr(addr) && system_uses_ttbr0_pan())
+	if (addr < TASK_SIZE && system_uses_ttbr0_pan())
 		return fsc_type == ESR_ELx_FSC_FAULT &&
 			(regs->pstate & PSR_PAN_BIT);
 
@@ -285,13 +260,8 @@ static void die_kernel_fault(const char *msg, unsigned long addr,
 {
 	bust_spinlocks(1);
 
-	pr_auto(ASL1, "Unable to handle kernel %s at virtual address %016lx\n", msg,
+	pr_alert("Unable to handle kernel %s at virtual address %016lx\n", msg,
 		 addr);
-
-#ifdef CONFIG_SEC_DEBUG_EXTRA_INFO
-	secdbg_exin_set_fault(KERNEL_FAULT, addr, regs);
-	secdbg_exin_set_esr(esr);
-#endif
 
 	mem_abort_decode(esr);
 
@@ -343,7 +313,7 @@ static void __do_user_fault(struct siginfo *info, unsigned int esr)
 	 * type", so we ignore this wrinkle and just return the translation
 	 * fault.)
 	 */
-	if (!is_ttbr0_addr(current->thread.fault_address)) {
+	if (current->thread.fault_address >= TASK_SIZE) {
 		switch (ESR_ELx_EC(esr)) {
 		case ESR_ELx_EC_DABT_LOW:
 			/*
@@ -409,12 +379,14 @@ static void do_bad_area(unsigned long addr, unsigned int esr, struct pt_regs *re
 #define VM_FAULT_BADMAP		0x010000
 #define VM_FAULT_BADACCESS	0x020000
 
-static vm_fault_t __do_page_fault(struct vm_area_struct *vma, unsigned long addr,
-				  unsigned int mm_flags, unsigned long vm_flags,
-				  struct task_struct *tsk)
+static vm_fault_t __do_page_fault(struct mm_struct *mm, unsigned long addr,
+			   unsigned int mm_flags, unsigned long vm_flags,
+			   struct task_struct *tsk)
 {
+	struct vm_area_struct *vma;
 	vm_fault_t fault;
 
+	vma = find_vma(mm, addr);
 	fault = VM_FAULT_BADMAP;
 	if (unlikely(!vma))
 		goto out;
@@ -458,7 +430,6 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 	vm_fault_t fault, major = 0;
 	unsigned long vm_flags = VM_READ | VM_WRITE | VM_EXEC;
 	unsigned int mm_flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
-	struct vm_area_struct *vma = NULL;
 
 	if (notify_page_fault(regs, esr))
 		return 0;
@@ -483,7 +454,7 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 		mm_flags |= FAULT_FLAG_WRITE;
 	}
 
-	if (is_ttbr0_addr(addr) && is_el1_permission_fault(esr, regs, addr)) {
+	if (addr < TASK_SIZE && is_el1_permission_fault(esr, regs, addr)) {
 		/* regs->orig_addr_limit may be 0 if we entered from EL0 */
 		if (regs->orig_addr_limit == KERNEL_DS)
 			die_kernel_fault("access to user memory with fs=KERNEL_DS",
@@ -499,14 +470,6 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 	}
 
 	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, addr);
-
-	/*
-	 * let's try a speculative page fault without grabbing the
-	 * mmap_sem.
-	 */
-	fault = handle_speculative_fault(mm, addr, mm_flags, &vma);
-	if (fault != VM_FAULT_RETRY)
-		goto done;
 
 	/*
 	 * As per x86, we may deadlock here. However, since the kernel only
@@ -530,10 +493,7 @@ retry:
 #endif
 	}
 
-	if (!vma || !can_reuse_spf_vma(vma, addr))
-		vma = find_vma(mm, addr);
-
-	fault = __do_page_fault(vma, addr, mm_flags, vm_flags, tsk);
+	fault = __do_page_fault(mm, addr, mm_flags, vm_flags, tsk);
 	major |= fault & VM_FAULT_MAJOR;
 
 	if (fault & VM_FAULT_RETRY) {
@@ -556,19 +516,10 @@ retry:
 		if (mm_flags & FAULT_FLAG_ALLOW_RETRY) {
 			mm_flags &= ~FAULT_FLAG_ALLOW_RETRY;
 			mm_flags |= FAULT_FLAG_TRIED;
-
-			/*
-			 * Do not try to reuse this vma and fetch it
-			 * again since we will release the mmap_sem.
-			 */
-			vma = NULL;
-
 			goto retry;
 		}
 	}
 	up_read(&mm->mmap_sem);
-
-done:
 
 	/*
 	 * Handle the "normal" (no error) case first.
@@ -649,31 +600,11 @@ no_context:
 	return 0;
 }
 
-int __weak do_tlb_conf_fault(unsigned long addr,
-			     unsigned int esr,
-			     struct pt_regs *regs)
-{
-	return 1; /* do_bad default */
-}
-
-int (*do_tlb_conf_fault_cb)(unsigned long addr,
-			    unsigned int esr,
-			    struct pt_regs *regs)
-	= do_tlb_conf_fault; /* initialization saves us a branch */
-EXPORT_SYMBOL_GPL(do_tlb_conf_fault_cb);
-
-static int _do_tlb_conf_fault(unsigned long addr,
-			      unsigned int esr,
-			      struct pt_regs *regs)
-{
-	return (*do_tlb_conf_fault_cb)(addr, esr, regs);
-}
-
 static int __kprobes do_translation_fault(unsigned long addr,
 					  unsigned int esr,
 					  struct pt_regs *regs)
 {
-	if (is_ttbr0_addr(addr))
+	if (addr < TASK_SIZE)
 		return do_page_fault(addr, esr, regs);
 
 	do_bad_area(addr, esr, regs);
@@ -692,24 +623,13 @@ static int do_bad(unsigned long addr, unsigned int esr, struct pt_regs *regs)
 	return 1; /* "fault" */
 }
 
-#ifdef CONFIG_SEC_DEBUG_AVOID_UNNECESSARY_TRAP
-unsigned long sea_incorrect_addr;
-#endif
-
 static int do_sea(unsigned long addr, unsigned int esr, struct pt_regs *regs)
 {
 	struct siginfo info;
 	const struct fault_info *inf;
 
-#ifdef CONFIG_SEC_DEBUG_AVOID_UNNECESSARY_TRAP
-	sea_incorrect_addr = addr;
-#endif
-
 	inf = esr_to_fault_info(esr);
 
-	if (IS_ENABLED(CONFIG_SEC_DEBUG_FAULT_MSG_ADV))
-		pr_auto(ASL1, "%s (0x%08x) at 0x%016lx[0x%09llx]\n",
-			      inf->name, esr, addr, show_virt_to_phys(addr));
 	/*
 	 * Synchronous aborts may interrupt code which had interrupts masked.
 	 * Before calling out into the wider kernel tell the interested
@@ -724,13 +644,6 @@ static int do_sea(unsigned long addr, unsigned int esr, struct pt_regs *regs)
 		if (interrupts_enabled(regs))
 			nmi_exit();
 	}
-
-#ifdef CONFIG_SEC_DEBUG_EXTRA_INFO
-	if (!user_mode(regs)) {
-		secdbg_exin_set_fault(SEABORT_FAULT, addr, regs);
-		secdbg_exin_set_esr(esr);
-	}
-#endif
 
 	clear_siginfo(&info);
 	info.si_signo = inf->sig;
@@ -794,7 +707,7 @@ static const struct fault_info fault_info[] = {
 	{ do_bad,		SIGKILL, SI_KERNEL,	"unknown 45"			},
 	{ do_bad,		SIGKILL, SI_KERNEL,	"unknown 46"			},
 	{ do_bad,		SIGKILL, SI_KERNEL,	"unknown 47"			},
-	{ _do_tlb_conf_fault,	SIGKILL, SI_KERNEL,	"TLB conflict abort"		},
+	{ do_bad,		SIGKILL, SI_KERNEL,	"TLB conflict abort"		},
 	{ do_bad,		SIGKILL, SI_KERNEL,	"Unsupported atomic hardware update fault"	},
 	{ do_bad,		SIGKILL, SI_KERNEL,	"unknown 50"			},
 	{ do_bad,		SIGKILL, SI_KERNEL,	"unknown 51"			},
@@ -827,15 +740,7 @@ asmlinkage void __exception do_mem_abort(unsigned long addr, unsigned int esr,
 		return;
 
 	if (!user_mode(regs)) {
-		if (IS_ENABLED(CONFIG_SEC_DEBUG_FAULT_MSG_ADV))
-			pr_auto(ASL1, "Unhandled fault: %s (0x%08x) at 0x%016lx\n",
-						inf->name, esr, addr);
-		else
-			pr_alert("Unhandled fault at 0x%016lx\n", addr);
-#ifdef CONFIG_SEC_DEBUG_EXTRA_INFO
-		secdbg_exin_set_fault(MEM_ABORT_FAULT, addr, regs);
-		secdbg_exin_set_esr(esr);
-#endif
+		pr_alert("Unhandled fault at 0x%016lx\n", addr);
 		mem_abort_decode(esr);
 		show_pte(addr);
 	}
@@ -863,7 +768,7 @@ asmlinkage void __exception do_el0_ia_bp_hardening(unsigned long addr,
 	 * re-enabled IRQs. If the address is a kernel address, apply
 	 * BP hardening prior to enabling IRQs and pre-emption.
 	 */
-	if (!is_ttbr0_addr(addr))
+	if (addr > TASK_SIZE)
 		arm64_apply_bp_hardening();
 
 	local_irq_enable();
@@ -878,26 +783,12 @@ asmlinkage void __exception do_sp_pc_abort(unsigned long addr,
 	struct siginfo info;
 
 	if (user_mode(regs)) {
-		if (!is_ttbr0_addr(instruction_pointer(regs)))
+		if (instruction_pointer(regs) > TASK_SIZE)
 			arm64_apply_bp_hardening();
 		local_irq_enable();
 	}
 
 	clear_siginfo(&info);
-
-#if defined(CONFIG_SEC_DEBUG_FAULT_MSG_ADV)
-	if (!user_mode(regs))
-		pr_auto(ASL1, "%s exception: pc=0x%016llx sp=0x%016llx\n",
-			esr_get_class_string(esr),
-			regs->pc, regs->sp);
-#endif
-#ifdef CONFIG_SEC_DEBUG_EXTRA_INFO
-	if (!user_mode(regs)) {
-		secdbg_exin_set_fault(SP_PC_ABORT_FAULT, addr, regs);
-		secdbg_exin_set_esr(esr);
-	}
-#endif
-
 	info.si_signo = SIGBUS;
 	info.si_errno = 0;
 	info.si_code  = BUS_ADRALN;
@@ -984,7 +875,7 @@ asmlinkage int __exception do_debug_exception(unsigned long addr_if_watchpoint,
 	if (interrupts_enabled(regs))
 		trace_hardirqs_off();
 
-	if (user_mode(regs) && !is_ttbr0_addr(pc))
+	if (user_mode(regs) && pc > TASK_SIZE)
 		arm64_apply_bp_hardening();
 
 	if (!inf->fn(addr_if_watchpoint, esr, regs)) {

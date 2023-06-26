@@ -53,7 +53,6 @@
 #include <trace/events/initcall.h>
 #define CREATE_TRACE_POINTS
 #include <trace/events/printk.h>
-#include <soc/samsung/debug-snapshot.h>
 
 #include "console_cmdline.h"
 #include "braille.h"
@@ -104,7 +103,7 @@ enum devkmsg_log_masks {
 };
 
 /* Keep both the 'on' and 'off' bits clear, i.e. ratelimit by default: */
-#define DEVKMSG_LOG_MASK_DEFAULT	DEVKMSG_LOG_MASK_ON
+#define DEVKMSG_LOG_MASK_DEFAULT	0
 
 static unsigned int __read_mostly devkmsg_log = DEVKMSG_LOG_MASK_DEFAULT;
 
@@ -365,16 +364,6 @@ struct printk_log {
 	u8 facility;		/* syslog facility */
 	u8 flags:5;		/* internal record flags */
 	u8 level:3;		/* syslog level */
-#ifdef CONFIG_PRINTK_PROCESS
-	char process[16];	/* process name */
-	pid_t pid;		/* process id */
-	u8 cpu;			/* cpu id */
-	u8 in_interrupt;	/* interrupt context */
-#endif
-#ifdef CONFIG_SEC_DEBUG_AUTO_COMMENT
-	u8 for_auto_comment;
-	u8 type_auto_comment;
-#endif
 }
 #ifdef CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS
 __packed __aligned(4)
@@ -440,11 +429,7 @@ static u64 exclusive_console_stop_seq;
 static u64 clear_seq;
 static u32 clear_idx;
 
-#if defined(CONFIG_PRINTK_PROCESS)
-#define PREFIX_MAX		48
-#else
 #define PREFIX_MAX		32
-#endif
 #define LOG_LINE_MAX		(1024 - PREFIX_MAX)
 
 #define LOG_LEVEL(v)		((v) & 0x07)
@@ -475,14 +460,12 @@ char *log_buf_addr_get(void)
 {
 	return log_buf;
 }
-EXPORT_SYMBOL_GPL(log_buf_addr_get);
 
 /* Return log buffer size */
 u32 log_buf_len_get(void)
 {
 	return log_buf_len;
 }
-EXPORT_SYMBOL_GPL(log_buf_len_get);
 
 /* human readable text of the record */
 static char *log_text(const struct printk_log *msg)
@@ -586,91 +569,6 @@ static u32 msg_used_size(u16 text_len, u16 dict_len, u32 *pad_len)
 	return size;
 }
 
-#ifdef CONFIG_SEC_DEBUG_AUTO_COMMENT
-static void (*func_hook_auto_comm)(int type, const char *buf, size_t size);
-void register_set_auto_comm_buf(void (*func)(int type, const char *buf, size_t size))
-{
-	func_hook_auto_comm = func;
-}
-#endif
-
-#ifdef CONFIG_SEC_DEBUG_INIT_LOG
-static void (*func_hook_init_log)(const char *buf, size_t size);
-void register_init_log_hook_func(void (*func)(const char *buf, size_t size))
-{
-	func_hook_init_log = func;
-}
-#endif
-
-static size_t hook_size;
-static char hook_text[LOG_LINE_MAX + PREFIX_MAX];
-static hook_func_t func_hook_logbuf;
-static size_t msg_print_text(const struct printk_log *msg, bool syslog,
-			     char *buf, size_t size);
-void register_hook_logbuf(hook_func_t func)
-{
-	unsigned long flags;
-
-	if (!func)
-		return;
-
-	raw_spin_lock_irqsave(&logbuf_lock, flags);
-	/*
-	 * In register hooking function,  we should check messages already
-	 * printed on log_buf. If so, they will be copyied to backup
-	 * exynos log buffer
-	 * */
-	if (log_first_seq != log_next_seq) {
-		unsigned int step, step_idx = log_first_idx;
-		struct printk_log *msg;
-
-		for (step = log_first_seq; step < log_next_seq; step++) {
-			msg = (struct printk_log *)(log_buf + step_idx);
-			hook_size = msg_print_text(msg, false,
-					hook_text, LOG_LINE_MAX + PREFIX_MAX);
-			func(hook_text, hook_size, DSS_ITEM_KERNEL_ID);
-			func(hook_text, hook_size, DSS_ITEM_FIRST_ID);
-			if (msg->level <= LOGLEVEL_ERR)
-				func(hook_text, hook_size, DSS_ITEM_FATAL_ID);
-			step_idx = log_next(step_idx);
-		}
-	}
-	func_hook_logbuf = func;
-	raw_spin_unlock_irqrestore(&logbuf_lock, flags);
-}
-
-#ifdef CONFIG_SEC_DEBUG_FIRST2M_LOG
-void (*func_hook_first_kmsg)(const char *buf, size_t size);
-void register_first_kmsg_hook_func(void (*func)(const char *buf, size_t size))
-{
-	unsigned long flags;
-
-	raw_spin_lock_irqsave(&logbuf_lock, flags);
-	/*
-	 * In register hooking function,  we should check messages already
-	 * printed on log_buf. If so, they will be copyied to backup
-	 * first2M log buffer
-	 * */
-	if (log_first_seq != log_next_seq) {
-		unsigned int step_seq, step_idx, start, end;
-		struct printk_log *msg;
-		start = log_first_seq;
-		end = log_next_seq;
-		step_idx = log_first_idx;
-		for (step_seq = start; step_seq < end; step_seq++) {
-			msg = (struct printk_log *)(log_buf + step_idx);
-			hook_size = msg_print_text(msg,
-					true, hook_text, LOG_LINE_MAX + PREFIX_MAX);
-			func(hook_text, hook_size);
-			step_idx = log_next(step_idx);
-		}
-	}
-	func_hook_first_kmsg = func;
-	raw_spin_unlock_irqrestore(&logbuf_lock, flags);
-
-}
-#endif
-
 /*
  * Define how much of the log buffer we could take at maximum. The value
  * must be greater than two. Note that only half of the buffer is available
@@ -740,13 +638,6 @@ static int log_store(int facility, int level,
 	memcpy(log_dict(msg), dict, dict_len);
 	msg->dict_len = dict_len;
 	msg->facility = facility;
-
-#ifdef CONFIG_SEC_DEBUG_AUTO_COMMENT
-	msg->for_auto_comment = (level / 10 == 9) ? 1 : 0;
-	msg->type_auto_comment = (level / 10 == 9) ? level - LOGLEVEL_PR_AUTO_BASE : 0;
-	level = (msg->for_auto_comment) ? 0 : level;
-#endif
-
 	msg->level = level & 7;
 	msg->flags = flags & 0x1f;
 	if (ts_nsec > 0)
@@ -755,39 +646,6 @@ static int log_store(int facility, int level,
 		msg->ts_nsec = local_clock();
 	memset(log_dict(msg) + dict_len, 0, pad_len);
 	msg->len = size;
-#ifdef CONFIG_PRINTK_PROCESS
-	strncpy(msg->process, current->comm, sizeof(msg->process) - 1);
-	msg->process[sizeof(msg->process) - 1] = '\0';
-	msg->pid = task_pid_nr(current);
-	msg->cpu = smp_processor_id();
-	msg->in_interrupt = in_interrupt() ? 1 : 0;
-#endif
-	if (func_hook_logbuf) {
-		hook_size = msg_print_text(msg, false, hook_text, LOG_LINE_MAX + PREFIX_MAX);
-		func_hook_logbuf(hook_text, hook_size, DSS_ITEM_KERNEL_ID);
-		func_hook_logbuf(hook_text, hook_size, DSS_ITEM_FIRST_ID);
-		if (msg->facility && task_pid_nr(current) == 1)
-			func_hook_logbuf(hook_text, hook_size,
-					DSS_ITEM_INIT_TASK_ID);
-		if (msg->level <= LOGLEVEL_ERR)
-			func_hook_logbuf(hook_text, hook_size,
-					DSS_ITEM_FATAL_ID);
-#ifdef CONFIG_SEC_DEBUG_AUTO_COMMENT
-		if (msg->for_auto_comment && func_hook_auto_comm)
-			func_hook_auto_comm(msg->type_auto_comment, hook_text, hook_size);
-#endif
-
-#ifdef CONFIG_SEC_DEBUG_INIT_LOG
-		/* user log only */
-		if (msg->facility && task_pid_nr(current) == 1 && func_hook_init_log)
-			func_hook_init_log(hook_text, hook_size);
-#endif
-
-#ifdef CONFIG_SEC_DEBUG_FIRST2M_LOG
-		if (func_hook_first_kmsg)
-			func_hook_first_kmsg(hook_text, hook_size);
-#endif
-	}
 
 	/* insert message */
 	log_next_idx += msg->len;
@@ -1286,7 +1144,6 @@ void __init setup_log_buf(int early)
 	if (!new_log_buf_len)
 		return;
 
-	set_memsize_kernel_type(MEMSIZE_KERNEL_LOGBUF);
 	if (early) {
 		new_log_buf =
 			memblock_virt_alloc(new_log_buf_len, LOG_ALIGN);
@@ -1294,7 +1151,6 @@ void __init setup_log_buf(int early)
 		new_log_buf = memblock_virt_alloc_nopanic(new_log_buf_len,
 							  LOG_ALIGN);
 	}
-	set_memsize_kernel_type(MEMSIZE_KERNEL_OTHERS);
 
 	if (unlikely(!new_log_buf)) {
 		pr_err("log_buf_len: %lu bytes not available\n",
@@ -1409,23 +1265,6 @@ static size_t print_time(u64 ts, char *buf)
 		       (unsigned long)ts, rem_nsec / 1000);
 }
 
-#ifdef CONFIG_PRINTK_PROCESS
-static size_t print_process(const struct printk_log *msg, char *buf)
-
-{
-	if (!buf)
-		return snprintf(NULL, 0, "%c[%1d:%15s:%5d] ", ' ', 0, " ", 0);
-
-	return sprintf(buf, "%c[%1d:%15s:%5d] ",
-			msg->in_interrupt ? 'I' : ' ',
-			msg->cpu,
-			msg->process,
-			msg->pid);
-}
-#else
-#define print_process(msg, buf) 0
-#endif
-
 static size_t print_prefix(const struct printk_log *msg, bool syslog, char *buf)
 {
 	size_t len = 0;
@@ -1446,8 +1285,6 @@ static size_t print_prefix(const struct printk_log *msg, bool syslog, char *buf)
 	}
 
 	len += print_time(msg->ts_nsec, buf ? buf + len : NULL);
-	len += print_process(msg, buf ? buf + len : NULL);
-
 	return len;
 }
 
@@ -2065,12 +1902,6 @@ int vprintk_store(int facility, int level,
 				if (level == LOGLEVEL_DEFAULT)
 					level = kern_level - '0';
 				/* fallthrough */
-#ifdef CONFIG_SEC_DEBUG_AUTO_COMMENT
-			case 'B' ... 'J':
-				if (level == LOGLEVEL_DEFAULT)
-					level = LOGLEVEL_PR_AUTO_BASE + (kern_level - 'A'); /* 91 ~ 99 */
-				/* fallthrough */
-#endif
 			case 'd':	/* KERN_DEFAULT */
 				lflags |= LOG_PREFIX;
 				break;

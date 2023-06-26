@@ -387,7 +387,6 @@ create_s32_tzp_attr(k_d);
 create_s32_tzp_attr(integral_cutoff);
 create_s32_tzp_attr(slope);
 create_s32_tzp_attr(offset);
-create_s32_tzp_attr(integral_max);
 #undef create_s32_tzp_attr
 
 /*
@@ -422,7 +421,6 @@ static struct attribute *thermal_zone_dev_attrs[] = {
 	&dev_attr_integral_cutoff.attr,
 	&dev_attr_slope.attr,
 	&dev_attr_offset.attr,
-	&dev_attr_integral_max.attr,
 	NULL,
 };
 
@@ -705,7 +703,7 @@ cur_state_store(struct device *dev, struct device_attribute *attr,
 		const char *buf, size_t count)
 {
 	struct thermal_cooling_device *cdev = to_cooling_device(dev);
-	unsigned long state, max_state;
+	unsigned long state;
 	int result;
 
 	if (sscanf(buf, "%ld\n", &state) != 1)
@@ -713,12 +711,6 @@ cur_state_store(struct device *dev, struct device_attribute *attr,
 
 	if ((long)state < 0)
 		return -EINVAL;
-
-	result = cdev->ops->get_max_state(cdev, &max_state);
-	if(result)
-		return result;
-	else
-		state = state >= max_state ? max_state : state;
 
 	mutex_lock(&cdev->lock);
 

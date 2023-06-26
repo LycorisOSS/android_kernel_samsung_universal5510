@@ -32,7 +32,6 @@
 #include <linux/backing-dev.h>
 #include <linux/rculist_bl.h>
 #include <linux/cleancache.h>
-#include <linux/fscrypt.h>
 #include <linux/fsnotify.h>
 #include <linux/lockdep.h>
 #include <linux/user_namespace.h>
@@ -289,7 +288,6 @@ static void __put_super(struct super_block *s)
 		WARN_ON(s->s_inode_lru.node);
 		WARN_ON(!list_empty(&s->s_mounts));
 		security_sb_free(s);
-		fscrypt_sb_free(s);
 		put_user_ns(s->s_user_ns);
 		kfree(s->s_subtype);
 		call_rcu(&s->rcu, destroy_super_rcu);
@@ -310,8 +308,6 @@ static void put_super(struct super_block *sb)
 	spin_unlock(&sb_lock);
 }
 
-/* @fs.sec -- 89e449513e5bea6196d9aaf62a6936ae -- */
-void (*ufs_debug_func)(void *) = NULL;
 
 /**
  *	deactivate_locked_super	-	drop an active reference to superblock
@@ -838,8 +834,7 @@ rescan:
 }
 
 /**
- *	do_remount_sb2 - asks filesystem to change mount options.
- *	@mnt:   mount we are looking at
+ *	do_remount_sb - asks filesystem to change mount options.
  *	@sb:	superblock in question
  *	@sb_flags: revised superblock flags
  *	@data:	the rest of options
@@ -847,7 +842,7 @@ rescan:
  *
  *	Alters the mount options of a mounted file system.
  */
-int do_remount_sb2(struct vfsmount *mnt, struct super_block *sb, int sb_flags, void *data, int force)
+int do_remount_sb(struct super_block *sb, int sb_flags, void *data, int force)
 {
 	int retval;
 	int remount_ro;
@@ -889,16 +884,7 @@ int do_remount_sb2(struct vfsmount *mnt, struct super_block *sb, int sb_flags, v
 		}
 	}
 
-	if (mnt && sb->s_op->remount_fs2) {
-		retval = sb->s_op->remount_fs2(mnt, sb, &sb_flags, data);
-		if (retval) {
-			if (!force)
-				goto cancel_readonly;
-			/* If forced remount, go ahead despite any errors */
-			WARN(1, "forced remount of a %s fs returned %i\n",
-			     sb->s_type->name, retval);
-		}
-	} else if (sb->s_op->remount_fs) {
+	if (sb->s_op->remount_fs) {
 		retval = sb->s_op->remount_fs(sb, &sb_flags, data);
 		if (retval) {
 			if (!force)
@@ -928,11 +914,6 @@ int do_remount_sb2(struct vfsmount *mnt, struct super_block *sb, int sb_flags, v
 cancel_readonly:
 	sb->s_readonly_remount = 0;
 	return retval;
-}
-
-int do_remount_sb(struct super_block *sb, int flags, void *data, int force)
-{
-	return do_remount_sb2(NULL, sb, flags, data, force);
 }
 
 static void do_emergency_remount_callback(struct super_block *sb)
@@ -1260,7 +1241,7 @@ struct dentry *mount_single(struct file_system_type *fs_type,
 EXPORT_SYMBOL(mount_single);
 
 struct dentry *
-mount_fs(struct file_system_type *type, int flags, const char *name, struct vfsmount *mnt, void *data)
+mount_fs(struct file_system_type *type, int flags, const char *name, void *data)
 {
 	struct dentry *root;
 	struct super_block *sb;
@@ -1277,10 +1258,7 @@ mount_fs(struct file_system_type *type, int flags, const char *name, struct vfsm
 			goto out_free_secdata;
 	}
 
-	if (type->mount2)
-		root = type->mount2(mnt, type, flags, name, data);
-	else
-		root = type->mount(type, flags, name, data);
+	root = type->mount(type, flags, name, data);
 	if (IS_ERR(root)) {
 		error = PTR_ERR(root);
 		goto out_free_secdata;
@@ -1323,20 +1301,25 @@ out:
 	return ERR_PTR(error);
 }
 
-static int __super_setup_bdi_name(struct super_block *sb,
-				  struct backing_dev_info *(*bdi_alloc_func)(gfp_t),
-				  char *fmt, va_list args)
+/*
+ * Setup private BDI for given superblock. It gets automatically cleaned up
+ * in generic_shutdown_super().
+ */
+int super_setup_bdi_name(struct super_block *sb, char *fmt, ...)
 {
 	struct backing_dev_info *bdi;
 	int err;
+	va_list args;
 
-	bdi = bdi_alloc_func(GFP_KERNEL);
+	bdi = bdi_alloc(GFP_KERNEL);
 	if (!bdi)
 		return -ENOMEM;
 
 	bdi->name = sb->s_type->name;
 
+	va_start(args, fmt);
 	err = bdi_register_va(bdi, fmt, args);
+	va_end(args);
 	if (err) {
 		bdi_put(bdi);
 		return err;
@@ -1346,40 +1329,7 @@ static int __super_setup_bdi_name(struct super_block *sb,
 
 	return 0;
 }
-
-/*
- * Setup private BDI for given superblock. It gets automatically cleaned up
- * in generic_shutdown_super().
- */
-int super_setup_bdi_name(struct super_block *sb, char *fmt, ...)
-{
-	va_list args;
-	int ret;
-
-	va_start(args, fmt);
-	ret =  __super_setup_bdi_name(sb, bdi_alloc, fmt, args);
-	va_end(args);
-
-	return ret;
-}
 EXPORT_SYMBOL(super_setup_bdi_name);
-
-/*
- * Setup private SEC_BDI for given superblock. It gets automatically cleaned up
- * in generic_shutdown_super().
- */
-int sec_super_setup_bdi_name(struct super_block *sb, char *fmt, ...)
-{
-	va_list args;
-	int ret;
-
-	va_start(args, fmt);
-	ret =  __super_setup_bdi_name(sb, sec_bdi_alloc, fmt, args);
-	va_end(args);
-
-	return ret;
-}
-EXPORT_SYMBOL(sec_super_setup_bdi_name);
 
 /*
  * Setup private BDI for given superblock. I gets automatically cleaned up

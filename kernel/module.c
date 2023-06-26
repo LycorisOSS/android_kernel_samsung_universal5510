@@ -66,9 +66,6 @@
 #include <linux/audit.h>
 #include <uapi/linux/module.h>
 #include "module-internal.h"
-#ifdef CONFIG_RKP
-#include <linux/rkp.h>
-#endif
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/module.h>
@@ -2171,8 +2168,6 @@ void __weak module_arch_freeing_init(struct module *mod)
 {
 }
 
-static void cfi_cleanup(struct module *mod);
-
 /* Free a module, remove from lists, etc. */
 static void free_module(struct module *mod)
 {
@@ -2214,10 +2209,6 @@ static void free_module(struct module *mod)
 
 	/* This may be empty, but that's OK */
 	disable_ro_nx(&mod->init_layout);
-
-	/* Clean up CFI for the module. */
-	cfi_cleanup(mod);
-
 	module_arch_freeing_init(mod);
 	module_memfree(mod->init_layout.base);
 	kfree(mod->args);
@@ -3404,8 +3395,6 @@ int __weak module_finalize(const Elf_Ehdr *hdr,
 	return 0;
 }
 
-static void cfi_init(struct module *mod);
-
 static int post_relocation(struct module *mod, const struct load_info *info)
 {
 	/* Sort exception table now relocations are done. */
@@ -3417,9 +3406,6 @@ static int post_relocation(struct module *mod, const struct load_info *info)
 
 	/* Setup kallsyms-specific fields. */
 	add_kallsyms(mod, info);
-
-	/* Setup CFI for the module. */
-	cfi_init(mod);
 
 	/* Arch-specific module finalizing. */
 	return module_finalize(info->hdr, info->sechdrs, mod);
@@ -3479,9 +3465,6 @@ static noinline int do_init_module(struct module *mod)
 {
 	int ret = 0;
 	struct mod_initfree *freeinit;
-#ifdef CONFIG_RKP
-	struct module_info rkp_mod_info;
-#endif
 
 	freeinit = kmalloc(sizeof(*freeinit), GFP_KERNEL);
 	if (!freeinit) {
@@ -3550,16 +3533,6 @@ static noinline int do_init_module(struct module *mod)
 	mod_tree_remove_init(mod);
 	disable_ro_nx(&mod->init_layout);
 	module_arch_freeing_init(mod);
-#ifdef CONFIG_RKP
-	rkp_mod_info.base_va = 0;
-	rkp_mod_info.vm_size = 0;
-	rkp_mod_info.core_base_va = (u64)mod->core_layout.base;
-	rkp_mod_info.core_text_size = (u64)mod->core_layout.text_size;
-	rkp_mod_info.core_ro_size = (u64)mod->core_layout.ro_size;
-	rkp_mod_info.init_base_va = (u64)mod->init_layout.base;
-	rkp_mod_info.init_text_size = (u64)mod->init_layout.text_size;
-	uh_call(UH_APP_RKP, RKP_MODULE_LOAD, RKP_MODULE_PXN_SET, (u64)&rkp_mod_info, 0, 0);
-#endif
 	mod->init_layout.base = NULL;
 	mod->init_layout.size = 0;
 	mod->init_layout.ro_size = 0;
@@ -3648,9 +3621,6 @@ out_unlocked:
 static int complete_formation(struct module *mod, struct load_info *info)
 {
 	int err;
-#ifdef CONFIG_RKP
-	struct module_info rkp_mod_info;
-#endif
 
 	mutex_lock(&module_mutex);
 
@@ -3669,16 +3639,6 @@ static int complete_formation(struct module *mod, struct load_info *info)
 	/* Mark state as coming so strong_try_module_get() ignores us,
 	 * but kallsyms etc. can see us. */
 	mod->state = MODULE_STATE_COMING;
-#ifdef CONFIG_RKP
-	rkp_mod_info.base_va = 0;
-	rkp_mod_info.vm_size = 0;
-	rkp_mod_info.core_base_va = (u64)mod->core_layout.base;
-	rkp_mod_info.core_text_size = (u64)mod->core_layout.text_size;
-	rkp_mod_info.core_ro_size = (u64)mod->core_layout.ro_size;
-	rkp_mod_info.init_base_va = (u64)mod->init_layout.base;
-	rkp_mod_info.init_text_size = (u64)mod->init_layout.text_size;
-	uh_call(UH_APP_RKP, RKP_MODULE_LOAD, RKP_MODULE_PXN_CLEAR, (u64)&rkp_mod_info, 0, 0);
-#endif
 	mutex_unlock(&module_mutex);
 
 	return 0;
@@ -4214,24 +4174,6 @@ int module_kallsyms_on_each_symbol(int (*fn)(void *, const char *,
 	return 0;
 }
 #endif /* CONFIG_KALLSYMS */
-
-static void cfi_init(struct module *mod)
-{
-#ifdef CONFIG_CFI_CLANG
-	preempt_disable();
-	mod->cfi_check =
-		(cfi_check_fn)mod_find_symname(mod, CFI_CHECK_FN_NAME);
-	preempt_enable();
-	cfi_module_add(mod, module_addr_min, module_addr_max);
-#endif
-}
-
-static void cfi_cleanup(struct module *mod)
-{
-#ifdef CONFIG_CFI_CLANG
-	cfi_module_remove(mod, module_addr_min, module_addr_max);
-#endif
-}
 
 /* Maximum number of characters written by module_flags() */
 #define MODULE_FLAGS_BUF_SIZE (TAINT_FLAGS_COUNT + 4)
